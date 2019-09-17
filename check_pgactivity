@@ -1779,31 +1779,33 @@ sub check_archiver {
         WITH s AS
         (SELECT setting::bigint * CASE unit WHEN '8kB' THEN 8192 WHEN 'B' THEN 1 ELSE 0 END as walsegsize
                   FROM pg_catalog.pg_settings
-                  WHERE name = 'wal_segment_size' )
-        SELECT COALESCE(
-                 (4294967296/walsegsize)*('x'||lpad(split_part(current_pos, '/', 1),8,'0'))::bit(32)::bigint
-                 + ('x'||lpad(split_part(current_pos, '/', 2),8,'0'))::bit(32)::bigint / walsegsize
-                 - ('x' || substr(last_wal, 9, 8))::bit(32)::bigint * (4294967296/walsegsize)
-                 - ('x' || substr(last_wal, 17, 8))::bit(32)::bigint,
-                 0 /* return 0 if NULL */) AS ready_archives,
+                  WHERE name = 'wal_segment_size' ),
+        arch AS 
+        (SELECT a.*, 
+                    (last_failed_time >= last_archived_time OR (last_archived_time IS NULL AND last_failed_time IS NOT NULL)) as is_failing
+         FROM pg_stat_archiver a
+        ),
+        stats AS
+        (SELECT 
+                CASE WHEN is_failing THEN last_failed_wal ELSE last_archived_wal  END AS last_wal,
+                CASE WHEN pg_is_in_recovery() THEN pg_last_wal_receive_lsn() ELSE pg_current_wal_lsn() END AS current_pos,
+                CASE WHEN is_failing THEN last_failed_time ELSE NULL END AS failed_since
+         FROM arch
+        )
+        SELECT CASE WHEN ( (('x'||pg_walfile_name(current_pos))::bit(32)::bigint - ('x'||last_wal)::bit(32)::bigint)::bigint != 1 )
+                      THEN
+                         COALESCE(
+                           (4294967296/walsegsize)*('x'||lpad(split_part(current_pos::text, '/', 1),8,'0'))::bit(32)::bigint
+                           + ('x'||lpad(split_part(current_pos::text, '/', 2),8,'0'))::bit(32)::bigint / walsegsize
+                           - ('x' || substr(last_wal, 9, 8))::bit(32)::bigint * (4294967296/walsegsize)
+                           - ('x' || substr(last_wal, 17, 8))::bit(32)::bigint,
+                           0 /* return 0 if NULL */)
+                      ELSE 0 /* considers normal that the current WAL is not the last archived */
+               END AS ready_archives,
                COALESCE(
                  extract('epoch' from (current_timestamp - failed_since)),
-                 0 ) AS archive_failure_since
-        FROM (SELECT CASE WHEN (last_failed_time >= last_archived_time)
-                               OR (last_archived_time IS NULL AND last_failed_time IS NOT NULL)
-                            THEN last_failed_wal
-                            ELSE last_archived_wal
-                     END AS last_wal,
-                     CASE WHEN pg_is_in_recovery() THEN pg_last_wal_receive_lsn()::text
-                            ELSE pg_current_wal_lsn()::text
-                     END AS current_pos,
-                     CASE WHEN (last_failed_time >= last_archived_time)
-                               OR (last_archived_time IS NULL AND last_failed_time IS NOT NULL)
-                            THEN last_failed_time
-                            ELSE NULL
-                     END AS failed_since
-              FROM pg_stat_archiver
-             ) stats, s
+                 0 ) AS archiving_failure_duration
+        FROM stats, s
         };
 
         @rs = @{ query( $hosts[0], $query ) };
