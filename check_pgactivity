@@ -1783,20 +1783,26 @@ sub check_archiver {
         SELECT COALESCE(
                  (4294967296/walsegsize)*('x'||lpad(split_part(current_pos, '/', 1),8,'0'))::bit(32)::bigint
                  + ('x'||lpad(split_part(current_pos, '/', 2),8,'0'))::bit(32)::bigint / walsegsize
-                 - ('x' || substr(last_failed_wal, 9, 8))::bit(32)::bigint * (4294967296/walsegsize)
-                 - ('x' || substr(last_failed_wal, 17, 8))::bit(32)::bigint,
+                 - ('x' || substr(last_wal, 9, 8))::bit(32)::bigint * (4294967296/walsegsize)
+                 - ('x' || substr(last_wal, 17, 8))::bit(32)::bigint,
                  0 /* return 0 if NULL */) AS ready_archives,
-               extract('epoch' from (current_timestamp - last_failed_time)) AS oldest_archive_failure
+               COALESCE(
+                 extract('epoch' from (current_timestamp - failed_since)),
+                 0 ) AS archive_failure_since
         FROM (SELECT CASE WHEN (last_failed_time >= last_archived_time)
                                OR (last_archived_time IS NULL AND last_failed_time IS NOT NULL)
                             THEN last_failed_wal
-                            ELSE NULL
-                       END AS last_failed_wal,
-                       CASE WHEN pg_is_in_recovery() THEN pg_last_wal_receive_lsn()::text
+                            ELSE last_archived_wal
+                     END AS last_wal,
+                     CASE WHEN pg_is_in_recovery() THEN pg_last_wal_receive_lsn()::text
                             ELSE pg_current_wal_lsn()::text
-                       END AS current_pos,
-                       last_failed_time
-                  FROM pg_stat_archiver
+                     END AS current_pos,
+                     CASE WHEN (last_failed_time >= last_archived_time)
+                               OR (last_archived_time IS NULL AND last_failed_time IS NOT NULL)
+                            THEN last_failed_time
+                            ELSE NULL
+                     END AS failed_since
+              FROM pg_stat_archiver
              ) stats, s
         };
 
